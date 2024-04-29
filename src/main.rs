@@ -21,11 +21,13 @@ pub enum TypedError {
 #[derive(Deserialize)]
 struct Request {
     path: String,
+    algo: Option<HashAlg>,
 }
 
 #[derive(Debug, Serialize)]
 struct Response {
     hash_base64: String,
+    algo: HashAlg,
     image_size: (u32, u32),
     time_elapsed: f64,
 }
@@ -90,8 +92,8 @@ async fn put_object(
     let (width, height) = img.dimensions();
 
     // get hashing timing
-
-    let hasher = HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher();
+    let algo = event.payload.algo.unwrap_or(HashAlg::Gradient);
+    let hasher = HasherConfig::new().hash_alg(algo).to_hasher();
     let start = std::time::Instant::now();
     let hash = hasher.hash_image(&img);
     let elapsed = start.elapsed();
@@ -99,6 +101,7 @@ async fn put_object(
     Ok(Response {
         hash_base64: hash.to_base64(),
         image_size: (width, height),
+        algo,
         time_elapsed: elapsed.as_secs_f64(),
     })
 }

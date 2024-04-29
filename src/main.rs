@@ -57,7 +57,7 @@ async fn download_from_s3(
                 key = %key,
                 "failed to retrieve data from S3"
             );
-            return Err(TypedError::S3Get);
+            Err(TypedError::S3Get)
         }
     }
 }
@@ -71,7 +71,7 @@ async fn put_object(
     tracing::info!("handling a request");
 
     let key = event.payload.path.clone();
-    let response = download_from_s3(&s3_client, &bucket_name, &key).await?;
+    let response = download_from_s3(s3_client, bucket_name, &key).await?;
 
     let data = response
         .body

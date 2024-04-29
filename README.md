@@ -1,5 +1,7 @@
 # Lambda Image Hash in Rust
 
+[![CI](https://github.com/Jimexist/lambda_image_hash/actions/workflows/ci.yml/badge.svg)](https://github.com/Jimexist/lambda_image_hash/actions/workflows/ci.yml)
+
 This is a simple AWS Lambda function that takes an image located in S3 and returns the hash of the image.
 
 Your images have to be located in S3 already, and also accessible to the Lambda function itself.

@@ -1,81 +1,106 @@
 use aws_config::BehaviorVersion;
+use aws_sdk_s3::operation::get_object::GetObjectOutput;
+use image::io::Reader as ImageReader;
+use image::GenericImageView;
 use image_hasher::{HashAlg, HasherConfig};
 use lambda_runtime::{service_fn, Error, LambdaEvent};
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
+use std::io::Cursor;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum TypedError {
+    #[error("Failed to retrieve from S3")]
+    S3Get,
+    #[error("Failed to download from S3: `{0}`")]
+    S3Download(String),
+    #[error("Invalid image format `{0}` guessed")]
+    InvalidFormat(String),
+}
 
 #[derive(Deserialize)]
 struct Request {
-    body: String,
+    path: String,
 }
 
 #[derive(Debug, Serialize)]
 struct Response {
-    req_id: String,
-    body: String,
+    hash_base64: String,
+    image_size: (u32, u32),
+    time_elapsed: f64,
 }
 
-impl std::fmt::Display for Response {
-    /// Display the response struct as a JSON string
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let err_as_json = serde_json::json!(self).to_string();
-        write!(f, "{err_as_json}")
+async fn download_from_s3(
+    s3_client: &aws_sdk_s3::Client,
+    bucket_name: &str,
+    key: &str,
+) -> Result<GetObjectOutput, TypedError> {
+    let response = s3_client
+        .get_object()
+        .bucket(bucket_name)
+        .key(key)
+        .send()
+        .await;
+    match response {
+        Ok(output) => {
+            tracing::info!(
+                key = %key,
+                "data successfully retrieved from S3",
+            );
+            Ok(output)
+        }
+        Err(err) => {
+            tracing::error!(
+                err = %err,
+                key = %key,
+                "failed to retrieve data from S3"
+            );
+            return Err(TypedError::S3Get);
+        }
     }
 }
-
-impl std::error::Error for Response {}
 
 #[tracing::instrument(skip(s3_client, event), fields(req_id = %event.context.request_id))]
 async fn put_object(
     s3_client: &aws_sdk_s3::Client,
     bucket_name: &str,
     event: LambdaEvent<Request>,
-) -> Result<Response, Error> {
+) -> Result<Response, TypedError> {
     tracing::info!("handling a request");
-    // Generate a filename based on when the request was received.
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|n| n.as_secs())
-        .expect("SystemTime before UNIX EPOCH, clock might have gone backwards");
 
-    let filename = format!("{timestamp}.txt");
-    let response = s3_client
-        .put_object()
-        .bucket(bucket_name)
-        .body(event.payload.body.as_bytes().to_owned().into())
-        .key(&filename)
-        .content_type("text/plain")
-        .send()
-        .await;
+    let key = event.payload.path.clone();
+    let response = download_from_s3(&s3_client, &bucket_name, &key).await?;
 
-    match response {
-        Ok(_) => {
-            tracing::info!(
-                filename = %filename,
-                "data successfully stored in S3",
-            );
-            // Return `Response` (it will be serialized to JSON automatically by the runtime)
-            Ok(Response {
-                req_id: event.context.request_id,
-                body: format!(
-                    "the Lambda function has successfully stored your data in S3 with name '{filename}'"
-                ),
-            })
-        }
-        Err(err) => {
-            // In case of failure, log a detailed error to CloudWatch.
-            tracing::error!(
-                err = %err,
-                filename = %filename,
-                "failed to upload data to S3"
-            );
-            Err(Box::new(Response {
-                req_id: event.context.request_id,
-                body: "The Lambda function encountered an error and your data was not saved"
-                    .to_owned(),
-            }))
-        }
-    }
+    let data = response
+        .body
+        .collect()
+        .await
+        .map_err(|e| TypedError::S3Download(e.to_string()))?;
+
+    let bytes = data.into_bytes();
+
+    // Load image from bytes
+    let img = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| TypedError::InvalidFormat(e.to_string()))?
+        .decode()
+        .map_err(|e| TypedError::InvalidFormat(e.to_string()))?;
+
+    // get image size
+    let (width, height) = img.dimensions();
+
+    // get hashing timing
+
+    let hasher = HasherConfig::new().hash_alg(HashAlg::Gradient).to_hasher();
+    let start = std::time::Instant::now();
+    let hash = hasher.hash_image(&img);
+    let elapsed = start.elapsed();
+
+    Ok(Response {
+        hash_base64: hash.to_base64(),
+        image_size: (width, height),
+        time_elapsed: elapsed.as_secs_f64(),
+    })
 }
 
 #[tokio::main]
